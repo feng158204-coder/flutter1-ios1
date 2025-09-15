@@ -1,0 +1,125 @@
+name: iOS Build
+
+on:
+  push:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    env:
+      DEVELOPMENT_TEAM: UA9Z6NRCL8
+      CODE_SIGN_STYLE: Manual
+      CODE_SIGN_IDENTITY: "iPhone Distribution"
+      PROVISIONING_PROFILE_SPECIFIER: "Flutter1 Distribution"
+      ARCHS: "arm64"
+      ONLY_ACTIVE_ARCH: "NO"
+      VALID_ARCHS: "arm64 arm64e"
+    
+    steps:
+    - uses: actions/checkout@v4
+    - uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.24.5'
+        channel: 'stable'
+    
+    - name: 设置Xcode版本
+      run: |
+        # 使用macOS runner上可用的Xcode版本
+        sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+        echo "=== Xcode版本信息 ==="
+        xcodebuild -version
+    
+    - name: 验证开发环境
+      run: |
+        echo "=== 验证macOS版本 ==="
+        sw_vers
+        echo "=== 验证Flutter版本 ==="
+        flutter --version
+        echo "=== 验证Xcode版本 ==="
+        xcodebuild -version
+        echo "=== 验证Git版本 ==="
+        git --version
+    
+    - name: flutter clean
+      run: flutter clean
+
+    - name: flutter pub get
+      run: flutter pub get
+
+    - name: 清理并重新安装iOS依赖
+      run: |
+        cd ios/
+        rm -rf Podfile
+        pod install
+        cd ..
+
+    - name: 配置iOS构建环境
+      run: |
+        echo "=== 配置iOS构建环境 ==="
+        flutter config --enable-ios
+        echo "=== 验证Flutter环境 ==="
+        flutter doctor
+
+    - name: 配置iOS证书和描述文件
+      run: |
+        echo "=== 检查证书配置 ==="
+        # 检查secrets是否存在且不为空
+        if [ "${{ secrets.IOS_P12_BASE64 }}" = "" ] || [ "${{ secrets.IOS_MOBILEPROVISION_BASE64 }}" = "" ] || [ "${{ secrets.KEYCHAIN_PASSWORD }}" = "" ] || [ "${{ secrets.P12_PASSWORD }}" = "" ]; then
+          echo "⚠️  警告：iOS证书secrets未完全配置，将跳过证书安装"
+          echo "请在GitHub仓库的Settings > Secrets中配置以下secrets："
+          echo "- IOS_P12_BASE64"
+          echo "- IOS_MOBILEPROVISION_BASE64"
+          echo "- KEYCHAIN_PASSWORD"
+          echo "- P12_PASSWORD"
+          echo ""
+          echo "配置步骤："
+          echo "1. 获取iOS分发证书和Provisioning Profile"
+          echo "2. 转换为Base64格式"
+          echo "3. 在GitHub仓库Settings > Secrets中添加上述secrets"
+          exit 0
+        fi
+        
+        echo "=== 开始配置证书 ==="
+        # 创建证书目录
+        mkdir -p ~/private_keys
+        
+        # 解码并安装P12证书
+        echo "解码P12证书..."
+        if ! echo "${{ secrets.IOS_P12_BASE64 }}" | base64 -D > ~/private_keys/certificate.p12; then
+          echo "❌ P12证书解码失败"
+          exit 1
+        fi
+        
+        # 解码并安装mobileprovision文件
+        echo "解码Provisioning Profile..."
+        if ! echo "${{ secrets.IOS_MOBILEPROVISION_BASE64 }}" | base64 -D > ~/private_keys/profile.mobileprovision; then
+          echo "❌ Provisioning Profile解码失败"
+          exit 1
+        fi
+        
+        # 创建临时keychain
+        security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
+        security default-keychain -s build.keychain
+        security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
+        security set-keychain-settings -t 3600 -u build.keychain
+        
+        # 导入P12证书
+        security import ~/private_keys/certificate.p12 -k build.keychain -P "${{ secrets.P12_PASSWORD }}" -A
+        security set-key-partition-list -S apple-tool:,apple: -s -k "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
+        
+        # 安装mobileprovision文件
+        mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+        cp ~/private_keys/profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
+        
+        # 列出可用的证书和描述文件
+        security find-identity -v -p codesigning
+        ls ~/Library/MobileDevice/Provisioning\ Profiles/
+    
+    - name: iOS构建 (64位真机)
+      run: |
+        echo "=== 开始iOS真机构建 ==="
+        flutter build ipa --release --no-codesign
+        echo "=== 构建完成，IPA文件位置 ==="
+        find build/ios/ipa -name "*.ipa" -type f
