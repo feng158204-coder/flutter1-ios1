@@ -50,9 +50,8 @@ jobs:
 
     - name: 清理并重新安装iOS依赖
       run: |
-        cd ios/
+        cd ios
         rm -rf Podfile
-        pod install
         cd ..
 
     - name: 配置iOS构建环境
